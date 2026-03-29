@@ -89,6 +89,7 @@ import {
   updateChainHandler,
 } from "./handlers/adminChains";
 import { startChainRegistryHotReload, stopChainRegistryHotReload } from "./services/chainRegistryService";
+import {
   deleteDeviceTokenHandler,
   listDeviceTokensHandler,
   registerDeviceTokenHandler,
@@ -109,6 +110,7 @@ import { swaggerSpec } from "./swagger";
 import { initializeTreasuryRefill } from "./workers/treasuryRefill";
 import { initializeDigestWorker } from "./workers/digestWorker";
 import { transactionStore } from "./workers/transactionStore";
+import { TreasuryRebalancer } from "./services/treasuryRebalancer";
 
 dotenv.config();
 const logger = createLogger({ component: "server" });
@@ -125,10 +127,12 @@ if (fcmNotifier.isConfigured()) {
     "FCM push notifications disabled - FCM_PROJECT_ID/FCM_CLIENT_EMAIL/FCM_PRIVATE_KEY not set",
   );
 }
-
+const treasuryRebalancer = new TreasuryRebalancer(config);
 const alertService = new AlertService(config.alerting, slackNotifier, {
   fcmNotifier,
+  treasuryRebalancer,
 });
+treasuryRebalancer.setAlertService(alertService);
 
 const app = express();
 app.use(express.json());
@@ -398,6 +402,38 @@ app.get("/admin/digest/unsubscribe", digestUnsubscribeHandler);
 app.post("/admin/digest/unsubscribe", digestUnsubscribeHandler);
 app.post("/admin/digest/send-now", sendDigestNowHandler);
 
+// Intelligent rate limiting admin routes
+app.get("/admin/rate-limit/candidates", (req: Request, res: Response) => {
+  void (async () => {
+    const { getUpgradeCandidatesHandler } = await import("./handlers/adminRateLimit");
+    getUpgradeCandidatesHandler(req, res);
+  })();
+});
+app.post("/admin/rate-limit/adjust", (req: Request, res: Response) => {
+  void (async () => {
+    const { adminTierAdjustmentHandler } = await import("./handlers/adminRateLimit");
+    adminTierAdjustmentHandler(req, res);
+  })();
+});
+app.get("/admin/rate-limit/usage/:tenantId", (req: Request, res: Response) => {
+  void (async () => {
+    const { getTenantUsageHandler } = await import("./handlers/adminRateLimit");
+    getTenantUsageHandler(req, res);
+  })();
+});
+app.get("/admin/rate-limit/adjustments", (req: Request, res: Response) => {
+  void (async () => {
+    const { getTierAdjustmentsHandler } = await import("./handlers/adminRateLimit");
+    getTierAdjustmentsHandler(req, res);
+  })();
+});
+app.post("/admin/rate-limit/manual-score", (req: Request, res: Response) => {
+  void (async () => {
+    const { triggerManualScoringHandler } = await import("./handlers/adminRateLimit");
+    triggerManualScoringHandler(req, res);
+  })();
+});
+
 // Chain registry — supported network management (Phase 11)
 app.get("/admin/chains", (req: Request, res: Response) => {
   void listChainsHandler(req, res);
@@ -545,6 +581,15 @@ try {
   }
 } catch (error) {
   logger.error({ ...serializeError(error) }, "Failed to start daily digest worker");
+}
+
+// Daily scoring worker for intelligent rate limiting
+try {
+  const { dailyScoringWorker } = await import("./workers/dailyScoringWorker");
+  dailyScoringWorker.start();
+  logger.info("Daily scoring worker started");
+} catch (error) {
+  logger.error({ ...serializeError(error) }, "Failed to start daily scoring worker");
 }
 
 // Chain registry hot-reload (reads enabled chains from DB on interval)
